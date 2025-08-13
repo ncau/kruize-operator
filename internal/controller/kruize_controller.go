@@ -95,6 +95,14 @@ type KruizeReconciler struct {
 //+kubebuilder:rbac:groups=metrics.k8s.io,resources=nodes,verbs=get;list;watch
 //+kubebuilder:rbac:groups=autoscaling.k8s.io,resources=verticalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
+const (
+	DefaultDBInitTimeout    = 90 * time.Second
+	DefaultRBACTimeout      = 30 * time.Second
+	DefaultPodCheckInterval = 15 * time.Second
+	DefaultRequeueInterval  = 5 * time.Minute
+	MinRequiredPods         = 3
+)
+
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
@@ -117,7 +125,7 @@ func (r *KruizeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, err
 	}
 
-	fmt.Println("kruize object base: ", kruize.Spec)
+	logger.Info("kruize object base: ", kruize.Spec)
 
 	// Call your deployment function with proper error handling
 	err = r.deployKruize(ctx, kruize)
@@ -126,7 +134,7 @@ func (r *KruizeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
 
-	fmt.Println("Deployment initiated, waiting for pods to be ready")
+	logger.Info("Deployment initiated, waiting for pods to be ready")
 
 	// Determine the target namespace based on cluster type
 	var targetNamespace string
@@ -199,6 +207,8 @@ func (r *KruizeReconciler) waitForKruizePods(ctx context.Context, namespace stri
 }
 
 func (r *KruizeReconciler) checkKruizePodsStatus(ctx context.Context, namespace string) (int, int, map[string]string, error) {
+	logger := log.FromContext(ctx)
+
 	podList := &corev1.PodList{}
 	err := r.Client.List(ctx, podList, client.InNamespace(namespace))
 	if err != nil {
@@ -222,7 +232,7 @@ func (r *KruizeReconciler) checkKruizePodsStatus(ctx context.Context, namespace 
 	readyCount := 0
 	for _, pod := range kruizePods {
 		podStatus[pod.Name] = string(pod.Status.Phase)
-		fmt.Printf("Pod %s status: %s\n", pod.Name, pod.Status.Phase)
+		logger.Info("Pod status check", "pod", pod.Name, "phase", pod.Status.Phase)
 
 		// Check if pod is ready
 		if pod.Status.Phase == corev1.PodRunning {
@@ -230,7 +240,7 @@ func (r *KruizeReconciler) checkKruizePodsStatus(ctx context.Context, namespace 
 			for _, condition := range pod.Status.Conditions {
 				if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
 					readyCount++
-					fmt.Printf("Pod %s is ready\n", pod.Name)
+					logger.Info("Pod ready", "pod", pod.Name)
 					break
 				}
 			}
@@ -241,16 +251,17 @@ func (r *KruizeReconciler) checkKruizePodsStatus(ctx context.Context, namespace 
 }
 
 func (r *KruizeReconciler) deployKruize(ctx context.Context, kruize *mydomainv1alpha1.Kruize) error {
-	// Add debug output
-	fmt.Printf("=== DEBUG: Kruize Spec Fields ===\n")
-	fmt.Printf("Cluster_type: '%s'\n", kruize.Spec.Cluster_type)
-	fmt.Printf("Namespace: '%s'\n", kruize.Spec.Namespace)
-	fmt.Printf("Size: %d\n", kruize.Spec.Size)
-	fmt.Printf("Autotune_version: '%s'\n", kruize.Spec.Autotune_version)
-	fmt.Printf("=== END DEBUG ===\n")
+	logger := log.FromContext(ctx)
+
+	// Logging the Kruize spec fields
+	logger.Info("Kruize Spec Fields",
+		"cluster_type", kruize.Spec.Cluster_type,
+		"namespace", kruize.Spec.Namespace,
+		"size", kruize.Spec.Size,
+		"autotune_version", kruize.Spec.Autotune_version)
 
 	cluster_type := kruize.Spec.Cluster_type
-	fmt.Println("Deploying Kruize for cluster type:", cluster_type)
+	logger.Info("Deploying Kruize for cluster type:", "cluster_type", cluster_type)
 
 	var autotune_ns string
 
@@ -269,7 +280,7 @@ func (r *KruizeReconciler) deployKruize(ctx context.Context, kruize *mydomainv1a
 		return fmt.Errorf("failed to deploy Kruize components: %v", err)
 	}
 
-	fmt.Printf("Successfully deployed Kruize components to namespace: %s\n", autotune_ns)
+	logger.Info("Successfully deployed Kruize components", "namespace", autotune_ns)
 	return nil
 }
 
@@ -295,7 +306,7 @@ func (r *KruizeReconciler) deployKruizeComponents(ctx context.Context, namespace
 		return nil
 	}
 
-	// Deploy Kruize DB (using emptyDir to avoid OpenShift permission issues)
+	// Deploy Kruize DB
 	kruizeDBManifest := r.generateKruizeDBManifest(namespace)
 	err := r.applyYAMLString(ctx, kruizeDBManifest, namespace)
 	if err != nil {
@@ -303,8 +314,8 @@ func (r *KruizeReconciler) deployKruizeComponents(ctx context.Context, namespace
 	}
 
 	// Wait for DB to initialize
-	fmt.Println("Waiting for database to initialize...")
-	time.Sleep(90 * time.Second)
+	logger.Info("Waiting for database to initialize...")
+	time.Sleep(DefaultDBInitTimeout)
 
 	// Deploy RBAC and ConfigMap
 	rbacAndConfigManifest := r.generateKruizeRBACAndConfigManifest(namespace, clusterType)
@@ -314,7 +325,7 @@ func (r *KruizeReconciler) deployKruizeComponents(ctx context.Context, namespace
 	}
 
 	// Wait for RBAC to propagate
-	fmt.Println("Waiting for RBAC to propagate...")
+	logger.Info("Waiting for RBAC to propagate...")
 	time.Sleep(30 * time.Second)
 
 	// Deploy Kruize main component
@@ -339,7 +350,7 @@ func (r *KruizeReconciler) deployKruizeComponents(ctx context.Context, namespace
 			return fmt.Errorf("failed to deploy Kruize routes: %v", err)
 		}
 	}
-
+	logger.Info("Successfully deployed all Kruize components", "namespace", namespace, "clusterType", clusterType)
 	return nil
 }
 
@@ -652,77 +663,6 @@ spec:
 `, namespace, namespace)
 }
 
-func (r *KruizeReconciler) installKruizeCRDs(ctx context.Context) error {
-	crdManifest := r.generateKruizeCRDManifest()
-	return r.applyYAMLString(ctx, crdManifest, "")
-}
-
-func (r *KruizeReconciler) generateKruizeCRDManifest() string {
-	return `
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  annotations:
-    controller-gen.kubebuilder.io/version: v0.17.3
-  name: kruizes.my.domain
-spec:
-  group: my.domain
-  names:
-    kind: Kruize
-    listKind: KruizeList
-    plural: kruizes
-    singular: kruize
-  scope: Namespaced
-  versions:
-  - name: v1alpha1
-    schema:
-      openAPIV3Schema:
-        description: Kruize is the Schema for the kruizes API
-        properties:
-          apiVersion:
-            description: 'APIVersion defines the versioned schema of this representation of an object.'
-            type: string
-          kind:
-            description: 'Kind is a string value representing the REST resource this object represents.'
-            type: string
-          metadata:
-            type: object
-          spec:
-            description: KruizeSpec defines the desired state of Kruize
-            properties:
-              autotune_configmaps:
-                type: string
-              autotune_ui_version:
-                type: string
-              autotune_version:
-                type: string
-              cluster_type:
-                type: string
-              namespace:
-                type: string
-              non_interactive:
-                format: int32
-                type: integer
-              size:
-                format: int32
-                type: integer
-              use_yaml_build:
-                format: int32
-                type: integer
-            required:
-            - cluster_type
-            type: object
-          status:
-            description: KruizeStatus defines the observed state of Kruize
-            type: object
-        type: object
-    served: true
-    storage: true
-    subresources:
-      status: {}
-`
-}
-
 func (r *KruizeReconciler) generateKruizeUIManifest(namespace string) string {
 	return fmt.Sprintf(`
 apiVersion: v1
@@ -983,7 +923,8 @@ spec:
 }
 
 func (r *KruizeReconciler) applyYAMLString(ctx context.Context, yamlContent string, namespace string) error {
-	fmt.Printf("Applying YAML content (size: %d bytes) to namespace: %s\n", len(yamlContent), namespace)
+	logger := log.FromContext(ctx)
+	logger.Info("Applying YAML content", "size_bytes", len(yamlContent), "namespace", namespace)
 
 	docs := strings.Split(yamlContent, "---")
 
@@ -991,7 +932,7 @@ func (r *KruizeReconciler) applyYAMLString(ctx context.Context, yamlContent stri
 	if namespace != "" {
 		err := r.ensureNamespace(ctx, namespace)
 		if err != nil {
-			fmt.Printf("Warning: failed to ensure namespace %s: %v\n", namespace, err)
+			logger.Info("Warning: failed to ensure namespace", "namespace", namespace, "error", err)
 		}
 	}
 
@@ -1006,7 +947,7 @@ func (r *KruizeReconciler) applyYAMLString(ctx context.Context, yamlContent stri
 		dec := yaml.NewDecodingSerializer(unstructured.UnstructuredJSONScheme)
 		_, _, err := dec.Decode([]byte(doc), nil, obj)
 		if err != nil {
-			fmt.Printf("Warning: failed to decode YAML document %d: %v\n", i, err)
+			logger.Info("Warning: failed to decode YAML document", "document_index", i, "error", err)
 			failCount++
 			continue
 		}
@@ -1029,15 +970,15 @@ func (r *KruizeReconciler) applyYAMLString(ctx context.Context, yamlContent stri
 		})
 
 		if err != nil {
-			fmt.Printf("Warning: failed to apply %s/%s: %v\n", obj.GetKind(), obj.GetName(), err)
+			logger.Info("Warning: failed to apply resource", "kind", obj.GetKind(), "name", obj.GetName(), "error", err)
 			failCount++
 		} else {
-			fmt.Printf("Successfully applied %s/%s\n", obj.GetKind(), obj.GetName())
+			logger.Info("Successfully applied resource", "kind", obj.GetKind(), "name", obj.GetName())
 			successCount++
 		}
 	}
 
-	fmt.Printf("Applied %d resources successfully, %d failed\n", successCount, failCount)
+	logger.Info("Applied resources summary", "success_count", successCount, "fail_count", failCount)
 	return nil
 }
 

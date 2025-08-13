@@ -171,6 +171,24 @@ var _ = Describe("Kruize Controller", func() {
 			Expect(manifest).To(ContainSubstring("name: kruize"))
 			Expect(manifest).To(ContainSubstring("serviceAccountName: kruize-sa"))
 		})
+
+		It("should generate valid database manifest", func() {
+			manifest := reconciler.generateKruizeDBManifest("test-namespace")
+
+			Expect(manifest).To(ContainSubstring("kind: Deployment"))
+			Expect(manifest).To(ContainSubstring("name: kruize-db"))
+			Expect(manifest).To(ContainSubstring("postgres:15.2"))
+			Expect(manifest).To(ContainSubstring("kruize123"))
+		})
+
+		It("should generate valid UI manifest", func() {
+			manifest := reconciler.generateKruizeUIManifest("test-namespace")
+
+			Expect(manifest).To(ContainSubstring("kind: ConfigMap"))
+			Expect(manifest).To(ContainSubstring("nginx.conf"))
+			Expect(manifest).To(ContainSubstring("kind: Deployment"))
+			Expect(manifest).To(ContainSubstring("kruize-ui-nginx"))
+		})
 	})
 
 })
