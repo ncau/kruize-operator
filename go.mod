@@ -1,11 +1,10 @@
-module github.com/ncau/kruize-operator
+module github.com/kruize/kruize-operator
 
 go 1.22
 
 toolchain go1.24.4
 
 require (
-	github.com/kruize/kruize-operator v0.0.0-20250710075714-0779e586b840
 	github.com/onsi/ginkgo/v2 v2.14.0
 	github.com/onsi/gomega v1.30.0
 	k8s.io/api v0.29.2

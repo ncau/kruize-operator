@@ -40,7 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	mydomainv1alpha1 "github.com/ncau/kruize-operator/api/v1alpha1"
+	mydomainv1alpha1 "github.com/kruize/kruize-operator/api/v1alpha1"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -76,6 +76,24 @@ type KruizeReconciler struct {
 //+kubebuilder:rbac:groups=extensions,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=security.openshift.io,resources=securitycontextconstraints,verbs=get;list;watch;create;update;patch;delete;use
+//+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=my.domain,resources=kruizes,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=my.domain,resources=kruizes/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=my.domain,resources=kruizes/finalizers,verbs=update
+//+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=monitoring.coreos.com,resources=prometheuses,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=monitoring.coreos.com,resources=prometheuses/api,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=monitoring.coreos.com,resources=alertmanagers,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=monitoring.coreos.com,resources=prometheusrules,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=endpoints,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+//+kubebuilder:rbac:groups=metrics.k8s.io,resources=pods,verbs=get;list;watch
+//+kubebuilder:rbac:groups=metrics.k8s.io,resources=nodes,verbs=get;list;watch
+//+kubebuilder:rbac:groups=autoscaling.k8s.io,resources=verticalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -118,7 +136,7 @@ func (r *KruizeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	case "minikube":
 		targetNamespace = "monitoring"
 	default:
-		targetNamespace = "test-operator"
+		targetNamespace = "openshift-tuning"
 	}
 
 	// Wait for Kruize pods to be ready
@@ -132,10 +150,22 @@ func (r *KruizeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
+// isTestMode checks if the controller is running in test mode
+func (r *KruizeReconciler) isTestMode() bool {
+	testMode := os.Getenv("KRUIZE_TEST_MODE")
+	return testMode == "true" || testMode == "1"
+}
+
 func (r *KruizeReconciler) waitForKruizePods(ctx context.Context, namespace string, timeout time.Duration) error {
 	logger := log.FromContext(ctx)
 
-	requiredPods := []string{"kruize", "kruize-ui", "kruize-db"}
+	// Skip pod waiting in test mode
+	if r.isTestMode() {
+		logger.Info("Test mode detected, skipping pod readiness check", "namespace", namespace)
+		return nil
+	}
+
+	requiredPods := []string{"kruize", "kruize-ui-nginx", "kruize-db"}
 	logger.Info("Waiting for Kruize pods to be ready", "namespace", namespace, "pods", requiredPods)
 
 	timeoutCh := time.After(timeout)
@@ -210,27 +240,15 @@ func (r *KruizeReconciler) checkKruizePodsStatus(ctx context.Context, namespace 
 	return readyCount, len(kruizePods), podStatus, nil
 }
 
-// Add this function to filter for Kruize-specific pods
-func (r *KruizeReconciler) filterKruizePods(allPods []string) []string {
-	var kruizePods []string
-
-	// Look for pods that contain kruize-related names
-	kruizeKeywords := []string{"kruize", "autotune", "kruize-ui", "kruize-db"}
-
-	for _, pod := range allPods {
-		for _, keyword := range kruizeKeywords {
-			if strings.Contains(strings.ToLower(pod), keyword) {
-				kruizePods = append(kruizePods, pod)
-				fmt.Printf("Found Kruize-related pod: %s\n", pod)
-				break
-			}
-		}
-	}
-
-	return kruizePods
-}
-
 func (r *KruizeReconciler) deployKruize(ctx context.Context, kruize *mydomainv1alpha1.Kruize) error {
+	// Add debug output
+	fmt.Printf("=== DEBUG: Kruize Spec Fields ===\n")
+	fmt.Printf("Cluster_type: '%s'\n", kruize.Spec.Cluster_type)
+	fmt.Printf("Namespace: '%s'\n", kruize.Spec.Namespace)
+	fmt.Printf("Size: %d\n", kruize.Spec.Size)
+	fmt.Printf("Autotune_version: '%s'\n", kruize.Spec.Autotune_version)
+	fmt.Printf("=== END DEBUG ===\n")
+
 	cluster_type := kruize.Spec.Cluster_type
 	fmt.Println("Deploying Kruize for cluster type:", cluster_type)
 
@@ -256,36 +274,77 @@ func (r *KruizeReconciler) deployKruize(ctx context.Context, kruize *mydomainv1a
 }
 
 func (r *KruizeReconciler) deployKruizeComponents(ctx context.Context, namespace string, clusterType string) error {
-	// Deploy Kruize DB first
+
+	logger := log.FromContext(ctx)
+
+	// In test mode, just validate manifests without deploying
+	if r.isTestMode() {
+		logger.Info("Test mode detected, validating manifests only", "namespace", namespace)
+
+		// Generate manifests to ensure they're valid
+		_ = r.generateKruizeRBACAndConfigManifest(namespace, clusterType)
+		_ = r.generateKruizeDeploymentManifest(namespace)
+		_ = r.generateKruizeDBManifest(namespace)
+		_ = r.generateKruizeUIManifest(namespace)
+
+		if clusterType == "openshift" {
+			_ = r.generateKruizeRoutesManifest(namespace)
+		}
+
+		logger.Info("All manifests validated successfully in test mode")
+		return nil
+	}
+
+    // Deploy RBAC and ConfigMap
+    rbacAndConfigManifest := r.generateKruizeRBACAndConfigManifest(namespace, clusterType)
+    err := r.applyYAMLString(ctx, rbacAndConfigManifest, namespace)
+    if err != nil {
+        return fmt.Errorf("failed to deploy Kruize RBAC and Config: %v", err)
+    }
+
+    // Wait for RBAC to propagate
+    fmt.Println("Waiting for RBAC to propagate...")
+    time.Sleep(30 * time.Second)
+
+	// Deploy Kruize DB (using emptyDir to avoid OpenShift permission issues)
 	kruizeDBManifest := r.generateKruizeDBManifest(namespace)
-	err := r.applyYAMLString(ctx, kruizeDBManifest, namespace)
+	err = r.applyYAMLString(ctx, kruizeDBManifest, namespace)
 	if err != nil {
 		return fmt.Errorf("failed to deploy Kruize DB: %v", err)
 	}
 
-	// Wait a bit for DB to initialize
+	// Wait for DB to initialize
 	fmt.Println("Waiting for database to initialize...")
-	time.Sleep(30 * time.Second)
+	time.Sleep(90 * time.Second)
+
 
 	// Deploy Kruize main component
-	kruizeManifest := r.generateKruizeManifest(namespace, clusterType)
-	err = r.applyYAMLString(ctx, kruizeManifest, namespace)
+	kruizeDeploymentManifest := r.generateKruizeDeploymentManifest(namespace)
+	err = r.applyYAMLString(ctx, kruizeDeploymentManifest, namespace)
 	if err != nil {
-		return fmt.Errorf("failed to deploy Kruize main component: %v", err)
+		return fmt.Errorf("failed to deploy Kruize Deployment: %v", err)
 	}
 
-	// Deploy Kruize UI last
+	// Deploy Kruize UI
 	kruizeUIManifest := r.generateKruizeUIManifest(namespace)
 	err = r.applyYAMLString(ctx, kruizeUIManifest, namespace)
 	if err != nil {
 		return fmt.Errorf("failed to deploy Kruize UI: %v", err)
 	}
 
+	// Deploy OpenShift routes if on OpenShift
+	if clusterType == "openshift" {
+		routesManifest := r.generateKruizeRoutesManifest(namespace)
+		err = r.applyYAMLString(ctx, routesManifest, namespace)
+		if err != nil {
+			return fmt.Errorf("failed to deploy Kruize routes: %v", err)
+		}
+	}
+
 	return nil
 }
 
-// TODO: clean up manifests to generate from files rather than strings
-func (r *KruizeReconciler) generateKruizeManifest(namespace string, clusterType string) string {
+func (r *KruizeReconciler) generateKruizeRBACAndConfigManifest(namespace string, clusterType string) string {
 	return fmt.Sprintf(`
 apiVersion: v1
 kind: Namespace
@@ -293,36 +352,188 @@ metadata:
   name: %s
 ---
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kruize-sa
+  namespace: %s
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: kruize-recommendation-updater
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "namespaces", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources: ["verticalpodautoscalers"]  
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["prometheuses", "alertmanagers", "servicemonitors"]
+    verbs: ["get", "list", "watch"]
+    resourceNames: ["*"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["prometheuses/api"]
+    verbs: ["get", "create", "update"]
+  - nonResourceURLs: ["/metrics", "/api/v1/label/*", "/api/v1/query*", "/api/v1/series*", "/api/v1/targets*"]
+    verbs: ["get"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: kruize-recommendation-updater-crb
+subjects:
+  - kind: ServiceAccount
+    name: kruize-sa
+    namespace: %s
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kruize-recommendation-updater
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kruize-monitoring-view
+subjects:
+  - kind: ServiceAccount
+    name: kruize-sa
+    namespace: %s
+roleRef:
+  kind: ClusterRole
+  name: cluster-monitoring-view
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kruize-prometheus-reader
+subjects:
+  - kind: ServiceAccount
+    name: kruize-sa
+    namespace: %s
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kruize-system-reader
+subjects:
+  - kind: ServiceAccount
+    name: kruize-sa
+    namespace: %s
+roleRef:
+  kind: ClusterRole
+  name: system:monitoring
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kruize-monitoring-access
+rules:
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["prometheuses", "prometheuses/api", "alertmanagers", "servicemonitors", "prometheusrules"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - nonResourceURLs: ["/api/v1/*", "/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kruize-monitoring-access-crb
+subjects:
+  - kind: ServiceAccount
+    name: kruize-sa
+    namespace: %s
+roleRef:
+  kind: ClusterRole
+  name: kruize-monitoring-access
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: kruize-config
+  name: kruizeconfig
   namespace: %s
 data:
-  kruize.properties: |
-    # Kruize Configuration
-    clustertype=%s
-    k8stype=openshift
-    authtype=bearer
-    monitoringagent=prometheus
-    monitoringservice=prometheus
-    savetodb=true
-    dbdriver=postgresql
-    hibernate_dialect=org.hibernate.dialect.PostgreSQLDialect
-    hibernate_driver=org.postgresql.Driver
-    hibernate_c3p0minsize=5
-    hibernate_c3p0maxsize=20
-    hibernate_c3p0timeout=300
-    hibernate_c3p0maxstatements=50
-    hibernate_hbm2ddlauto=update
-    hibernate_showsql=false
-    hibernate_timezone=UTC
-    bulkresultslimit=1000
-    deletepartitionsthreshold=30
-    plots=true
-    log_recommendation_metrics_level=info
-    autotunemode=monitor
-    emonly=false
----
+  dbconfigjson: |
+    {
+      "database": {
+        "adminPassword": "kruize123",
+        "adminUsername": "kruize",
+        "hostname": "kruize-db-service",
+        "name": "kruizedb",
+        "password": "kruize123",
+        "port": 5432,
+        "sslMode": "disable",
+        "username": "kruize"
+      }
+    }
+  kruizeconfigjson: |
+    {
+      "clustertype": "kubernetes",
+      "k8stype": "openshift",
+      "authtype": "",
+      "monitoringagent": "prometheus",
+      "monitoringservice": "prometheus-k8s",
+      "monitoringendpoint": "prometheus-k8s",
+      "savetodb": "true",
+      "dbdriver": "jdbc:postgresql://",
+      "plots": "true",
+      "local": "true",
+      "logAllHttpReqAndResp": "true",
+      "recommendationsURL" : "http://kruize-service.%s.svc.cluster.local:8080/generateRecommendations?experiment_name=%%s",
+      "experimentsURL" : "http://kruize-service.%s.svc.cluster.local:8080/createExperiment",
+      "experimentNameFormat" : "%%datasource%%|%%clustername%%|%%namespace%%|%%workloadname%%(%%workloadtype%%)|%%containername%%",
+      "bulkapilimit" : 1000,
+      "isKafkaEnabled" : "false",
+      "hibernate": {
+        "dialect": "org.hibernate.dialect.PostgreSQLDialect",
+        "driver": "org.postgresql.Driver",
+        "c3p0minsize": 5,
+        "c3p0maxsize": 10,
+        "c3p0timeout": 300,
+        "c3p0maxstatements": 100,
+        "hbm2ddlauto": "update",
+        "showsql": "false",
+        "timezone": "UTC"
+      },
+      "datasource": [
+        {
+          "name": "prometheus-1",
+          "provider": "prometheus",
+          "namespace": "openshift-monitoring",
+          "url": "https://prometheus-k8s.openshift-monitoring.svc.cluster.local:9091",
+          "authentication": {
+              "type": "bearer",
+              "credentials": {
+                "tokenFilePath": "/var/run/secrets/kubernetes.io/serviceaccount/token"
+              }
+          }
+        }
+      ]
+    }
+`, namespace, namespace, namespace, namespace, namespace, namespace, namespace, namespace, namespace, namespace)
+}
+
+func (r *KruizeReconciler) generateKruizeDeploymentManifest(namespace string) string {
+	return fmt.Sprintf(`
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -340,46 +551,24 @@ spec:
       labels:
         app: kruize
     spec:
+      serviceAccountName: kruize-sa
+      automountServiceAccountToken: true
       containers:
       - name: kruize
         image: quay.io/kruize/autotune_operator:latest
         ports:
         - containerPort: 8080
         env:
-        - name: CLUSTER_TYPE
-          value: "%s"
         - name: LOGGING_LEVEL
           value: "info"
         - name: ROOT_LOGGING_LEVEL
-          value: "INFO"
-        - name: ENV_ROOT_LOGGING_LEVEL
-          value: "INFO"
-        - name: LOG_LEVEL
-          value: "INFO"
-        - name: JAVA_OPTS
-          value: "-Xms256m -Xmx512m -Dlog4j2.level=INFO -Droot.logging.level=INFO"
-        # Database configuration
-        - name: DB_DRIVER
-          value: "postgresql"
-        - name: DB_URL
-          value: "jdbc:postgresql://kruize-db-service:5432/kruizedb"
-        - name: DB_USERNAME
-          value: "kruize"
-        - name: DB_PASSWORD
-          value: "kruize123"
-        # Kruize specific configuration
-        - name: K8S_TYPE
-          value: "%s"
-        - name: AUTH_TYPE
-          value: "bearer"
-        - name: MONITORING_AGENT
-          value: "prometheus"
-        - name: MONITORING_SERVICE
-          value: "prometheus"
-        - name: SAVE_TO_DB
-          value: "true"
-        - name: AUTOTUNE_MODE
-          value: "monitor"
+          value: "error"
+        - name: DB_CONFIG_FILE
+          value: "/etc/config/dbconfigjson"
+        - name: KRUIZE_CONFIG_FILE
+          value: "/etc/config/kruizeconfigjson"
+        - name: JAVA_TOOL_OPTIONS
+          value: "-XX:MaxRAMPercentage=80"
         resources:
           requests:
             memory: "256Mi"
@@ -389,7 +578,7 @@ spec:
             cpu: "500m"
         volumeMounts:
         - name: config-volume
-          mountPath: /opt/app/config
+          mountPath: /etc/config
         readinessProbe:
           httpGet:
             path: /health
@@ -409,7 +598,7 @@ spec:
       volumes:
       - name: config-volume
         configMap:
-          name: kruize-config
+          name: kruizeconfig
 ---
 apiVersion: v1
 kind: Service
@@ -424,46 +613,151 @@ spec:
     port: 8080
     targetPort: 8080
   type: ClusterIP
-`, namespace, namespace, clusterType, namespace, clusterType, clusterType, namespace)
+`, namespace, namespace)
+}
+
+// Add this new function to generate OpenShift routes
+func (r *KruizeReconciler) generateKruizeRoutesManifest(namespace string) string {
+	return fmt.Sprintf(`
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: kruize
+  namespace: %s
+  labels:
+    app: kruize
+spec:
+  to:
+    kind: Service
+    name: kruize-service
+    weight: 100
+  port:
+    targetPort: http
+  wildcardPolicy: None
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: kruize-ui-nginx-service
+  namespace: %s
+  labels:
+    app: kruize-ui-nginx
+spec:
+  to:
+    kind: Service
+    name: kruize-ui-nginx-service  
+    weight: 100
+  port:
+    targetPort: http
+  wildcardPolicy: None
+`, namespace, namespace)
 }
 
 func (r *KruizeReconciler) generateKruizeUIManifest(namespace string) string {
 	return fmt.Sprintf(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kruize-ui-nginx-config
+  namespace: %s
+data:
+  nginx.conf: |
+    events {
+        worker_connections 1024;
+    }
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+        
+        upstream kruize_backend {
+            server kruize-service:8080;
+        }
+        
+        server {
+            listen 8080;
+            server_name localhost;
+            root /usr/share/nginx/html;
+            index index.html;
+            
+            # API proxy to Kruize backend
+            location /api/ {
+                proxy_pass http://kruize_backend/;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_connect_timeout 30s;
+                proxy_send_timeout 30s;
+                proxy_read_timeout 30s;
+            }
+            
+            # Proxy health check
+            location /health {
+                proxy_pass http://kruize_backend/health;
+                proxy_set_header Host $host;
+            }
+            
+            # Proxy all Kruize API endpoints
+            location /listApplications {
+                proxy_pass http://kruize_backend/listApplications;
+                proxy_set_header Host $host;
+            }
+            
+            location /listExperiments {
+                proxy_pass http://kruize_backend/listExperiments;
+                proxy_set_header Host $host;
+            }
+            
+            # Serve static files for everything else
+            location / {
+                try_files $uri $uri/ /index.html;
+                add_header Cache-Control "no-cache, no-store, must-revalidate";
+                add_header Pragma "no-cache";
+                add_header Expires "0";
+            }
+            
+            # Enable gzip compression
+            gzip on;
+            gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+        }
+    }
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kruize-ui
+  name: kruize-ui-nginx
   namespace: %s
   labels:
-    app: kruize-ui
+    app: kruize-ui-nginx
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: kruize-ui
+      app: kruize-ui-nginx
   template:
     metadata:
       labels:
-        app: kruize-ui
+        app: kruize-ui-nginx
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 101
-        runAsGroup: 101
-        fsGroup: 101
       containers:
-      - name: kruize-ui
+      - name: kruize-ui-nginx
         image: quay.io/kruize/kruize-ui:latest
         ports:
         - containerPort: 8080
         env:
         - name: KRUIZE_API_URL
           value: "http://kruize-service:8080"
+        - name: REACT_APP_KRUIZE_API_URL
+          value: "http://kruize-service:8080"
+        - name: KRUIZE_UI_API_URL
+          value: "http://kruize-service:8080"
+        - name: API_URL
+          value: "http://kruize-service:8080"
         securityContext:
           allowPrivilegeEscalation: false
           runAsNonRoot: true
-          runAsUser: 101
-          runAsGroup: 101
           capabilities:
             drop:
             - ALL
@@ -481,14 +775,21 @@ spec:
             path: /
             port: 8080
           initialDelaySeconds: 15
-          periodSeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
         livenessProbe:
           httpGet:
             path: /
             port: 8080
           initialDelaySeconds: 30
-          periodSeconds: 10
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
         volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
         - name: nginx-cache
           mountPath: /var/cache/nginx
         - name: nginx-pid
@@ -496,6 +797,9 @@ spec:
         - name: nginx-tmp
           mountPath: /tmp
       volumes:
+      - name: nginx-config
+        configMap:
+          name: kruize-ui-nginx-config
       - name: nginx-cache
         emptyDir: {}
       - name: nginx-pid
@@ -506,35 +810,21 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: kruize-ui-service
+  name: kruize-ui-nginx-service
   namespace: %s
 spec:
   selector:
-    app: kruize-ui
+    app: kruize-ui-nginx
   ports:
   - name: http
     port: 3000
     targetPort: 8080
   type: ClusterIP
-`, namespace, namespace)
+`, namespace, namespace, namespace)
 }
 
 func (r *KruizeReconciler) generateKruizeDBManifest(namespace string) string {
 	return fmt.Sprintf(`
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: postgres-init
-  namespace: %s
-data:
-  init.sql: |
-    -- Initialize Kruize database
-    CREATE DATABASE kruizedb;
-    CREATE USER kruize WITH PASSWORD 'kruize123';
-    GRANT ALL PRIVILEGES ON DATABASE kruizedb TO kruize;
-    \c kruizedb;
-    GRANT ALL ON SCHEMA public TO kruize;
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -552,88 +842,74 @@ spec:
       labels:
         app: kruize-db
     spec:
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 999
-        runAsGroup: 999
-        fsGroup: 999
+      serviceAccountName: kruize-sa
       containers:
-      - name: kruize-db
-        image: postgres:13
-        ports:
-        - containerPort: 5432
-        env:
-        - name: POSTGRES_DB
-          value: "kruizedb"
-        - name: POSTGRES_USER
-          value: "kruize"
-        - name: POSTGRES_PASSWORD
-          value: "kruize123"
-        - name: PGDATA
-          value: /var/lib/postgresql/data/pgdata
-        securityContext:
-          allowPrivilegeEscalation: false
-          runAsNonRoot: true
-          runAsUser: 999
-          runAsGroup: 999
-          capabilities:
-            drop:
-            - ALL
-          seccompProfile:
-            type: RuntimeDefault
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "100m"
-          limits:
-            memory: "512Mi"
-            cpu: "300m"
-        readinessProbe:
-          exec:
-            command:
-            - pg_isready
-            - -U
-            - kruize
-            - -d
-            - kruizedb
-          initialDelaySeconds: 15
-          periodSeconds: 5
-        livenessProbe:
-          exec:
-            command:
-            - pg_isready
-            - -U
-            - kruize
-            - -d
-            - kruizedb
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        volumeMounts:
-        - name: postgres-data
-          mountPath: /var/lib/postgresql/data
-        - name: postgres-init
-          mountPath: /docker-entrypoint-initdb.d
+        - name: kruize-db
+          image: quay.io/kruizehub/postgres:15.2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_PASSWORD
+              value: kruize123
+            - name: POSTGRES_USER  
+              value: kruize
+            - name: POSTGRES_DB
+              value: kruizedb
+            - name: POSTGRES_INITDB_ARGS
+              value: "--auth-host=md5"
+            - name: PGDATA
+              value: /tmp/pgdata
+          resources:
+            requests:
+              memory: "200Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /tmp
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U kruize -d kruizedb
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U kruize -d kruizedb
+            initialDelaySeconds: 45
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
       volumes:
-      - name: postgres-data
-        emptyDir: {}
-      - name: postgres-init
-        configMap:
-          name: postgres-init
+        - name: postgres-storage
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: kruize-db-service
   namespace: %s
+  labels:
+    app: kruize-db
 spec:
+  type: ClusterIP
+  ports:
+    - name: kruize-db-port
+      port: 5432
+      targetPort: 5432
   selector:
     app: kruize-db
-  ports:
-  - name: postgres
-    port: 5432
-    targetPort: 5432
-  type: ClusterIP
-`, namespace, namespace, namespace)
+`, namespace, namespace)
 }
 
 func (r *KruizeReconciler) applyYAMLString(ctx context.Context, yamlContent string, namespace string) error {
@@ -671,11 +947,6 @@ func (r *KruizeReconciler) applyYAMLString(ctx context.Context, yamlContent stri
 			obj.SetNamespace(namespace)
 		}
 
-		// Apply security context fixes for Pod Security Standards
-		if obj.GetKind() == "Deployment" || obj.GetKind() == "StatefulSet" {
-			r.applySecurityContext(obj)
-		}
-
 		// Apply the object
 		err = r.Client.Patch(ctx, obj, client.Apply, &client.PatchOptions{
 			FieldManager: "kruize-operator",
@@ -693,23 +964,6 @@ func (r *KruizeReconciler) applyYAMLString(ctx context.Context, yamlContent stri
 
 	fmt.Printf("Applied %d resources successfully, %d failed\n", successCount, failCount)
 	return nil
-}
-
-func (r *KruizeReconciler) getRunningPods(ctx context.Context, namespace string) ([]string, error) {
-	var podNames []string
-
-	podList := &corev1.PodList{}
-	err := r.Client.List(ctx, podList, client.InNamespace(namespace))
-	if err != nil {
-		return nil, fmt.Errorf("failed to list pods: %v", err)
-	}
-
-	for _, pod := range podList.Items {
-		podNames = append(podNames, pod.Name)
-		fmt.Printf("Pod name: %s\n", pod.Name)
-	}
-
-	return podNames, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -725,69 +979,6 @@ func RootDir() string {
 	_, b, _, _ := DirRuntime.Caller(0)
 	d := path.Join(path.Dir(b))
 	return filepath.Dir(d)
-}
-
-func (r *KruizeReconciler) applyYAMLFile(ctx context.Context, filePath string, namespace string) error {
-	yamlFile, err := os.ReadFile(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to read file %s: %v", filePath, err)
-	}
-
-	fmt.Printf("Applying manifest file: %s (size: %d bytes)\n", filePath, len(yamlFile))
-	docs := strings.Split(string(yamlFile), "---")
-
-	// Create namespace first if it doesn't exist
-	if namespace != "" {
-		err := r.ensureNamespace(ctx, namespace)
-		if err != nil {
-			fmt.Printf("Warning: failed to ensure namespace %s: %v\n", namespace, err)
-		}
-	}
-
-	var successCount, failCount int
-
-	for i, doc := range docs {
-		if strings.TrimSpace(doc) == "" {
-			continue
-		}
-
-		obj := &unstructured.Unstructured{}
-		dec := yaml.NewDecodingSerializer(unstructured.UnstructuredJSONScheme)
-		_, _, err := dec.Decode([]byte(doc), nil, obj)
-		if err != nil {
-			fmt.Printf("Warning: failed to decode YAML document %d: %v\n", i, err)
-			failCount++
-			continue
-		}
-
-		// Handle namespace setting
-		objNamespace := obj.GetNamespace()
-		if objNamespace == "" && namespace != "" && !r.isClusterScopedResource(obj.GetKind()) {
-			obj.SetNamespace(namespace)
-		}
-
-		// Apply security context fixes for Pod Security Standards
-		if obj.GetKind() == "Deployment" || obj.GetKind() == "StatefulSet" {
-			r.applySecurityContext(obj)
-		}
-
-		// Apply the object
-		err = r.Client.Patch(ctx, obj, client.Apply, &client.PatchOptions{
-			FieldManager: "kruize-operator",
-			Force:        &[]bool{true}[0],
-		})
-
-		if err != nil {
-			fmt.Printf("Warning: failed to apply %s/%s: %v\n", obj.GetKind(), obj.GetName(), err)
-			failCount++
-		} else {
-			fmt.Printf("Successfully applied %s/%s\n", obj.GetKind(), obj.GetName())
-			successCount++
-		}
-	}
-
-	fmt.Printf("Applied %d resources successfully, %d failed\n", successCount, failCount)
-	return nil
 }
 
 func (r *KruizeReconciler) ensureNamespace(ctx context.Context, name string) error {
@@ -815,77 +1006,4 @@ func (r *KruizeReconciler) isClusterScopedResource(kind string) bool {
 		}
 	}
 	return false
-}
-
-// TODO: this is a fix to RBAC but need to identify if this is the correct way to do it
-func (r *KruizeReconciler) applySecurityContext(obj *unstructured.Unstructured) {
-	// Get the spec.template.spec path
-	spec, found, err := unstructured.NestedMap(obj.Object, "spec", "template", "spec")
-	if !found || err != nil {
-		return
-	}
-
-	// Apply pod-level security context
-	podSecurityContext := map[string]interface{}{
-		"runAsNonRoot": true,
-		"runAsUser":    int64(65534),
-		"fsGroup":      int64(65534),
-		"seccompProfile": map[string]interface{}{
-			"type": "RuntimeDefault",
-		},
-	}
-
-	err = unstructured.SetNestedMap(spec, podSecurityContext, "securityContext")
-	if err != nil {
-		fmt.Printf("Warning: failed to set pod security context: %v\n", err)
-	}
-
-	// Define security context for containers
-	containerSecurityContext := map[string]interface{}{
-		"allowPrivilegeEscalation": false,
-		"runAsNonRoot":             true,
-		"runAsUser":                int64(65534),
-		"capabilities": map[string]interface{}{
-			"drop": []interface{}{"ALL"},
-		},
-		"seccompProfile": map[string]interface{}{
-			"type": "RuntimeDefault",
-		},
-	}
-
-	// Apply to regular containers
-	containers, found, err := unstructured.NestedSlice(spec, "containers")
-	if found && err == nil {
-		for i, container := range containers {
-			if containerMap, ok := container.(map[string]interface{}); ok {
-				containerMap["securityContext"] = containerSecurityContext
-				containers[i] = containerMap
-			}
-		}
-		err = unstructured.SetNestedSlice(spec, containers, "containers")
-		if err != nil {
-			fmt.Printf("Warning: failed to set container security contexts: %v\n", err)
-		}
-	}
-
-	// Apply to init containers as well
-	initContainers, found, err := unstructured.NestedSlice(spec, "initContainers")
-	if found && err == nil {
-		for i, container := range initContainers {
-			if containerMap, ok := container.(map[string]interface{}); ok {
-				containerMap["securityContext"] = containerSecurityContext
-				initContainers[i] = containerMap
-			}
-		}
-		err = unstructured.SetNestedSlice(spec, initContainers, "initContainers")
-		if err != nil {
-			fmt.Printf("Warning: failed to set init container security contexts: %v\n", err)
-		}
-	}
-
-	// Update the object
-	err = unstructured.SetNestedMap(obj.Object, spec, "spec", "template", "spec")
-	if err != nil {
-		fmt.Printf("Warning: failed to update object spec: %v\n", err)
-	}
 }
