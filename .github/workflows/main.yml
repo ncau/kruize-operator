@@ -1,0 +1,24 @@
+            - name: Kind Cluster
+  # You may pin to the exact commit or the version.
+  # uses: helm/kind-action@0025e74a8c7512023d06dc019c617aa3cf561fde
+  uses: helm/kind-action@v1.10.0
+  with:
+    # The kind version to use (default: v0.22.0)
+    version: # optional, default is v0.22.0
+    # The path to the kind config file
+    config: # optional
+    # The Docker image for the cluster nodes
+    node_image: # optional
+    # The name of the cluster to create (default: chart-testing)
+    cluster_name: # optional, default is chart-testing
+    # The duration to wait for the control plane to become ready (default: 60s)
+    wait: # optional, default is 60s
+    # The verbosity level for kind (default: 0)
+    verbosity: # optional, default is 0
+    # The kubectl version to use (default: v1.29.3)
+    kubectl_version: # optional, default is v1.29.3
+    # Skips cluster creation, only install kind (default: false)
+    install_only: # optional
+    # Whether to ignore the post-delete the cluster (default: false)
+    ignore_failed_clean: # optional, default is false
+          
