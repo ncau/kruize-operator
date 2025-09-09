@@ -1,0 +1,16 @@
+name: Create Cluster with Registry
+
+on: pull_request
+
+jobs:
+  create-cluster-with-registry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kubernetes KinD Cluster
+        id: kind
+        uses: helm/kind-action@v1
+        with:
+          registry: true
+          registry_name: my-registry
+          registry_port: 5001
+          registry_enable_delete: true
