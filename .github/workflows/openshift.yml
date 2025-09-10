@@ -90,8 +90,8 @@ jobs:
       with:
         script: |
           const secrets = {
-            OPENSHIFT_SERVER: `${{ secrets.OPENSHIFT_SERVER }}`,
-            OPENSHIFT_TOKEN: `${{ secrets.OPENSHIFT_TOKEN }}`,
+            OPENSHIFT_SERVER: "https://api.testopt.lab.upshift.rdu2.redhat.com:6443",
+            OPENSHIFT_TOKEN: "Ukqzy-ATxCd-cDxCg-jQ4En",
           };
 
           const GHCR = "ghcr.io";
